@@ -1,0 +1,86 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Django stuff:
+*.log
+*.pot
+*.pyc
+*.pyo
+*.mo
+*.sqlite3
+db.sqlite3
+media/
+staticfiles/
+
+# If your settings/local.py contains local settings
+settings/local.py
+
+# Backup files
+*.bak
+*.swp
+*.tmp
+
+# Pip environment files
+*.env
+*.venv
+env/
+venv/
+ENV/
+VENV/
+.virtualenv/
+
+# pytest
+.cache
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+
+# Django migrations (optional if you want to exclude auto-created ones)
+# ** Keep migrations if you're tracking them intentionally! **
+# */migrations/*.py
+# */migrations/*.pyc
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Node modules (if using npm/yarn for frontend)
+
+frontend/node_modules/
+frontend/package-lock.json
+frontend/.next/
+frontend/.env.*
+frontend/coverage/
+
+developer_frontend/node_modules/
+developer_frontend/package-lock.json
+developer_frontend/.next/
+developer_frontend/.env.*
+developer_frontend/coverage/
+# Test databases
+test*.sqlite3
+venv
