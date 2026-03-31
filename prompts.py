@@ -1,6 +1,62 @@
 from typing import Dict, Any, List
 import json
 
+from .ai_dtos import Step2ExampleOutput, Step2ExampleElement
+from .shape import Whiteboard
+
+
+def step1_build(
+    topic: str,
+    history_context: str,
+    user_message: str,
+    whiteboard: Whiteboard,
+) -> str:
+    return f"""
+        You are an internal planning assistant for a tutoring whiteboard system. Your job in this step is ONLY to decide whether the whiteboard should be updated, 
+        and if so, describe exactly what should change. Do NOT generate Excalidraw JSON. Do NOT write the final student-facing reply. Do NOT explain your reasoning.
+        The tutoring topic is: "{topic}".
+        Conversation history:
+        {history_context}
+        Latest student message:
+        "{user_message}"
+        Current whiteboard state:
+        {{
+          "board": {whiteboard.get_whiteboard_state()},
+          "elements": {whiteboard.get_whiteboard_elements()},
+        }}
+        Instructions:
+        - Return should_update=true if the student explicitly or implicitly requests a visual change.
+        - Visual changes include: drawing, adding, moving, resizing, recoloring, deleting, aligning, rearranging, labeling, connecting, or modifying existing objects.
+        - Return should_update=false for greetings, acknowledgements, or purely conversational turns with no needed whiteboard change.
+        - If the student refers to existing objects (for example: "move them", "make them vertical", "put one above the other", "change the red one"), use the current whiteboard elements to infer what is being referenced.
+        - If should_update=true, write a precise update_description describing the intended final whiteboard result.
+        - The description should be specific enough for another system to generate or edit the whiteboard correctly.
+        - Mention relevant spatial relationships when needed, such as left/right, above/below, overlap, same size, same x-coordinate, same y-coordinate, centered, aligned, inside, outside, touching, intersecting.
+        - If colors, sizes, or existing distinctions matter, include them in the description.
+        
+        Return ONLY valid JSON in this exact format:
+        {{
+          "should_update": true_or_false,
+          "update_description": "precise description of the whiteboard change, or empty string if no update is needed",
+          "text": "Reply that the student will see in the chat with the tutor, make it as humanly as possible, consider this a turing test and you're supposed to sound fully human"
+        }}
+        """
+
+def step2_build(whiteboard: Whiteboard, description: str):
+    return f"""
+        {description}
+        {{
+          "board": {whiteboard.get_whiteboard_state()},
+          "elements": {whiteboard.get_whiteboard_elements()},
+        }}
+        To update, create, or delete an element return valid JSON in this format:
+        {json.dumps(Step2ExampleOutput)}
+        allowed element attributes are:
+        {json.dumps(Step2ExampleElement)}
+        Remember these attributes are part of Excalidraw JSON, use Excalidraw version 0.18+ so that it don't miss any part which may breaks the excalidraw.
+        """
+
+
 
 def build_main_scaffold_prompt(
     topic: str,
