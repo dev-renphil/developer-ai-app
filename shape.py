@@ -166,20 +166,20 @@ class WhiteboardElement(BaseModel):
     height: int | float = 0
     locked: bool = False
     frameId: Any = None
-    opacity: Optional[int] = None
+    opacity: int = 100
     updated: Optional[int] = None
     version: Optional[int] = None
     groupIds: list[Any] = Field(default_factory=list)
-    fillStyle: Optional[str] = None
+    fillStyle: Optional[str] = "solid"
     isDeleted: bool = False
-    roughness: Optional[int] = None
+    roughness: Optional[int] = 0
     roundness: Roundness | dict[str, Any] | None = None
-    strokeColor: Optional[str] = None
-    strokeStyle: Optional[str] = None
-    strokeWidth: int | float = None
+    strokeColor: Optional[str] = "#000000"
+    strokeStyle: Optional[str] = "solid"
+    strokeWidth: int | float = 2
     versionNonce: Optional[int] = None
     boundElements: list[Any] = Field(default_factory=list)
-    backgroundColor: Optional[str] = None
+    backgroundColor: Optional[str] = "transparent"
 
     # line / arrow / freedraw
     points: list[Any] = Field(default_factory=list)
@@ -240,7 +240,12 @@ class Whiteboard(BaseModel):
         }
 
     def to_excalidraw_dict(self) -> dict[str, Any]:
-        return self.model_dump(exclude_none=False)
+        result = self.model_dump(exclude_none=False)
+        # Serialize elements without null fields
+        result["elements"] = [
+            e.model_dump(exclude_none=True) for e in self.elements
+        ]
+        return result
 
     def get_whiteboard_elements(self, simplified: bool = True) -> list[dict[str, Any]]:
         if not simplified:
@@ -269,9 +274,7 @@ class Whiteboard(BaseModel):
             el.model_dump(exclude_none=True) if hasattr(el, "model_dump") else el
             for el in self.elements
         ]
-
         patched_raw = apply_element_patches(existing_raw, patches)
-
         self.elements = [
             WhiteboardElement.model_validate(el)
             for el in patched_raw

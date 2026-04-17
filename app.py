@@ -310,17 +310,9 @@ def describe_user_intent(
 
     # ERROR CHECKS
     if not receive_dto.receiving_url:
-        log_trustcall_event(
-            "webhook_call", {"error": "receiving_url is required"}, success=False
-        )
         return jsonify({"error": "receiving_url is required"}), 400
 
     if not any([receive_dto.user_message, whiteboard.to_excalidraw_dict()]):
-        log_trustcall_event(
-            "webhook_call",
-            {"error": "message or whiteboard content is required"},
-            success=False,
-        )
         return jsonify({"error": "message or whiteboard content is required"}), 400
 
     PROMPT_SCAFFOLD = step1_build(
@@ -342,19 +334,6 @@ def describe_user_intent(
     openai_temperature = float(openai_temperature_str)
 
     try:
-        # TrustCall: Monitor AI API call
-        log_trustcall_event(
-            "ai_api_call",
-            {
-                "model": openai_model_step1,
-                "step": "step1_decision",
-                "session_id": receive_dto.session_id,
-            },
-            success=True,
-        )
-
-        # log_openai_prompt(logger, "STEP1", step1_content, max_chars=20000)
-
         step1_resp = client.chat.completions.create(
             model=openai_model_step1,
             messages=[{"role": "user", "content": step1_content}],
@@ -364,41 +343,14 @@ def describe_user_intent(
         print("Step 1 response:", step1_str)
         step1_reply = Step1Reply(**json.loads(step1_str))
 
-        # TrustCall: Log successful AI response
-        log_trustcall_event(
-            "ai_api_call",
-            {
-                "model": openai_model_step1,
-                "step": "step1_decision",
-                "response_length": len(step1_str),
-                "decision": step1_reply.should_update,
-            },
-            success=True,
-        )
-
         return step1_reply
 
     except Exception as e:
         print("Step 1 error:", e)
-        log_trustcall_event(
-            "ai_api_call",
-            {
-                "model": openai_model_step1,
-                "step": "step1_decision",
-                "error": str(e),
-            },
-            success=False,
-        )
         return jsonify({"error": f"Step 1 error: {e}"}), 500
 
 
 def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO):
-    start_time = time.time()
-    # If no template, proceed with normal LLM generation flow
-    logger.info(
-        "[WEBHOOK] No template found or template not usable - proceeding to Step 2 (LLM generation)"
-    )
-
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
         raise ValueError("OPENAI_TEMPERATURE must be set in .env file")
@@ -416,15 +368,6 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: Receive
                 "text": step2_build(whiteboard, step1_response.update_description),
             }
         ]
-
-        log_trustcall_event(
-            "whiteboard_generation",
-            {
-                "session_id": receive_dto.session_id,
-                "description": step1_response.update_description,
-            },
-            success=True,
-        )
 
         openai_model_step2 = os.getenv("OPENAI_MODEL_STEP2")
         if not openai_model_step2:
@@ -450,38 +393,20 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: Receive
         print(f"Step 2 error", e)
 
 
-@app.route("/receive2", methods=["POST"])
-def receive():
+@app.route("/draw", methods=["POST"])
+def draw():
     start_time = time.time()
     logger.info("=" * 80)
-    logger.info("[WEBHOOK] Received new request at /receive endpoint")
+    logger.info("Received new request at /draw endpoint")
     logger.info("=" * 80)
-
-    log_trustcall_event(
-        "webhook_call",
-        {
-            "endpoint": "/receive",
-            "method": "POST",
-            "timestamp": datetime.now().isoformat(),
-        },
-        success=True,
-    )
 
     try:
         data = request.get_json()  # Get the payload from the end user
-        logger.info("[WEBHOOK] Payload received, starting processing")
+        logger.info("Payload received, starting processing")
 
         # TrustCall: Validate webhook payload
         is_valid, validation_error = validate_webhook_payload(data)
         if not is_valid:
-            log_trustcall_event(
-                "payload_validation_error",
-                {
-                    "error": validation_error,
-                    "payload_keys": list(data.keys()) if data else [],
-                },
-                success=False,
-            )
             return jsonify({"error": f"Invalid payload: {validation_error}"}), 400
 
         receive_dto = ReceiveDTO(
@@ -500,17 +425,21 @@ def receive():
         whiteboard_state = data.get("whiteboard_state") or {}
         whiteboard = Whiteboard.model_validate(whiteboard_state)
         final_whiteboard_dict = whiteboard.to_excalidraw_dict()
+        intent_timer = time.time()
         step1_response = describe_user_intent(whiteboard, receive_dto)
+        logger.info(f"Total time to assume describe user intent: {time.time() - intent_timer}s")
 
         if step1_response.should_update:
             logger.info("\n")
             logger.info("Board should be updated!")
             logger.info("\n")
+            shape_timer = time.time()
             patches = generate_shapes(
                 whiteboard=whiteboard,
                 receive_dto=receive_dto,
                 step1_response=step1_response,
             )
+            logger.info(f"Total time to generate shapes: {time.time() - shape_timer}s")
             whiteboard.apply_patches_from_ai(patches)
             final_whiteboard_dict = whiteboard.to_excalidraw_dict()
 
@@ -524,18 +453,12 @@ def receive():
 
             logger.info(f"response json: {response_json}")
 
-            total_time = time.time() - start_time
-            log_trustcall_event(
-                "webhook_call",
-                {
-                    "step": "complete",
-                    "total_time": total_time,
-                    "whiteboard_updated": True,
-                    "success": True,
-                },
-                success=True,
+            requests.post(
+                receive_dto.receiving_url,
+                json={"response": response_json},
+                headers={"Content-Type": "application/json"},
             )
-
+            logger.info(f"Total time: {time.time() - start_time}s")
             return jsonify({"status": "sent", "reply": response_json}), 200
 
         else:
@@ -583,63 +506,26 @@ def receive():
                 json.dump(input_untouched_whiteboard, f, indent=4)
             try:
                 print("RECEIVING URL:", receive_dto.receiving_url, flush=True)
-                response = requests.post(
+                requests.post(
                     receive_dto.receiving_url,
                     json={"response": response_json},
                     headers={"Content-Type": "application/json"},
                 )
-                log_trustcall_event(
-                    "webhook_call",
-                    {
-                        "step": "send_response",
-                        "status_code": response.status_code,
-                        "whiteboard_updated": False,
-                        "success": True,
-                    },
-                    success=True,
-                )
             except Exception as e:
-                log_trustcall_event(
-                    "webhook_call",
-                    {"step": "send_response", "error": str(e), "success": False},
-                    success=False,
-                )
+                logger.error("Exception found: ", e)
                 raise
 
         logger.info(f"response json: {response_json}")
-
-        total_time = time.time() - start_time
-        log_trustcall_event(
-            "webhook_call",
-            {
-                "step": "complete",
-                "total_time": total_time,
-                "whiteboard_updated": False,
-                "success": True,
-            },
-            success=True,
-        )
-
+        logger.info(f"Total time: {time.time() - start_time}s")
         return jsonify({"status": "sent", "reply": response_json}), 200
 
     except Exception as e:
-        total_time = time.time() - start_time
-        log_trustcall_event(
-            "webhook_call",
-            {
-                "step": "error",
-                "total_time": total_time,
-                "error": str(e),
-                "error_type": type(e).__name__,
-            },
-            success=False,
-        )
-
         logger.error(f"Webhook error: {str(e)}", exc_info=True)
+        logger.info(f"Total time: {time.time() - start_time}s")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
-@app.route("/receive", methods=["POST"])
+@app.route("/receive2", methods=["POST"])
 def receive2():
     start_time = time.time()
     logger.info("=" * 80)
@@ -677,8 +563,6 @@ def receive2():
         history = data.get("history")  # The complete conversation history
         whiteboard_state = data.get("whiteboard_state")  # The whiteboard state in JSON
 
-        whiteboard = Whiteboard.model_validate(whiteboard_state or {})
-
         session_id = data.get(
             "session_id"
         )  # Session ID (which is the same as the whiteboard ID)
@@ -698,17 +582,15 @@ def receive2():
             f"[WEBHOOK] History length: {len(history) if history else 0} messages"
         )
         logger.info(
-            f"[WEBHOOK] Whiteboard has {len(whiteboard.elements) if whiteboard else 0} elements"
+            f"[WEBHOOK] Whiteboard has {len(whiteboard_state['elements']) if whiteboard_state else 0} elements"
         )
-
-        whiteboard_dict = whiteboard.to_excalidraw_dict()
 
         # Convert whiteboard to sympy JSON and store in DB
         sympy_json = None
         sympy_objects = []
         try:
-            if whiteboard_dict:
-                sympy_json = convert_whiteboard_to_sympy_json(whiteboard_dict)
+            if whiteboard_state:
+                sympy_json = convert_whiteboard_to_sympy_json(whiteboard_state)
                 logger.info(
                     f"[SYMPY] Converted whiteboard to sympy JSON: {sympy_json.get('metadata', {}).get('total_shapes', 0)} shapes"
                 )
@@ -765,10 +647,18 @@ def receive2():
 
         # INPUT WHITEBOARD CONVERSION
         input_whiteboard_image = "input.jpg"
-        get_whiteboard_image_preview(
-            root_url_with_scheme, whiteboard_state, input_whiteboard_image
-        )
-        input_wb_base64 = encode_image_to_base64(input_whiteboard_image)
+        try:
+            input_whiteboard_image = "input.jpg"
+            logger.info(f"[WEBHOOK] root_url_with_scheme: {root_url_with_scheme}")
+            logger.info(f"[WEBHOOK] receiving_url: {receiving_url}")
+            logger.info(f"[WEBHOOK] About to call get_whiteboard_image_preview")
+            get_whiteboard_image_preview(
+                root_url_with_scheme, whiteboard_state, input_whiteboard_image
+            )
+            input_wb_base64 = encode_image_to_base64(input_whiteboard_image)
+            logger.info("[WEBHOOK] Whiteboard preview image captured successfully")
+        except Exception as e:
+            logger.warning(f"[WEBHOOK] Could not get whiteboard preview image: {e}")
 
         # STEP 1: Check if whiteboard change is needed
         sympy_json_section = ""
