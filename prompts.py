@@ -49,6 +49,12 @@ def step2_build(whiteboard: Whiteboard, description: str):
           "board": {whiteboard.get_whiteboard_state()},
           "elements": {whiteboard.get_whiteboard_elements()},
         }}
+        CRITICAL OUTPUT RULE:
+        Return ONLY valid JSON.
+        Do not explain.
+        Do not use markdown.
+        Do not wrap in ```json.
+        Do not include any text before or after the JSON
         To update, create, or delete an element return valid JSON in this format:
         {json.dumps(Step2ExampleOutput)}
         allowed element attributes are:

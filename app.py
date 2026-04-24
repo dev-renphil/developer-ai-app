@@ -9,13 +9,12 @@ import uuid
 import random
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
-
-from openai import OpenAI
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 import os
 import sys
 from pathlib import Path
+from . import ai_steps
 
 from .ai_dtos import Step1Reply, ReceiveDTO
 from .shape import Whiteboard
@@ -67,10 +66,6 @@ dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
 app = Flask(__name__)
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise ValueError("OPENAI_API_KEY must be set in .env file")
-client = OpenAI(api_key=openai_api_key)
 
 # Configure logging for TrustCall monitoring
 logging.basicConfig(level=logging.INFO)
@@ -137,7 +132,7 @@ def log_trustcall_event(event_type: str, details: Dict[str, Any], success: bool 
 
 
 def validate_whiteboard_payload(
-    whiteboard_state: Dict[str, Any],
+        whiteboard_state: Dict[str, Any],
 ) -> Tuple[bool, Optional[str]]:
     """Validate whiteboard payload structure for TrustCall monitoring"""
     try:
@@ -282,8 +277,9 @@ LOOKBACK_LEN = int(lookback_len_str)
 
 
 def describe_user_intent(
-    whiteboard,
-    receive_dto: ReceiveDTO,
+        whiteboard,
+        receive_dto: ReceiveDTO,
+        use_ai: str
 ):
     # TODO: Remove this once Musa adds the AI_ID and Student_ID as payload attributes
     parsed_url = urlparse(receive_dto.receiving_url)
@@ -322,11 +318,9 @@ def describe_user_intent(
         whiteboard=whiteboard,
     )
 
-    step1_content = [{"type": "text", "text": PROMPT_SCAFFOLD}]
     # WE CAN NOW RUN STEP 1
-    # Load OpenAI configuration (used in both try and else blocks)
-    openai_model_step1 = os.getenv("OPENAI_MODEL_STEP1")
-    if not openai_model_step1:
+    model_step1 = os.getenv(f"{use_ai.upper()}_MODEL_STEP1")
+    if not model_step1:
         raise ValueError("OPENAI_MODEL_STEP1 must be set in .env file")
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
@@ -334,23 +328,17 @@ def describe_user_intent(
     openai_temperature = float(openai_temperature_str)
 
     try:
-        step1_resp = client.chat.completions.create(
-            model=openai_model_step1,
-            messages=[{"role": "user", "content": step1_content}],
-            temperature=openai_temperature,
-        )
-        step1_str = step1_resp.choices[0].message.content.strip()
-        print("Step 1 response:", step1_str)
-        step1_reply = Step1Reply(**json.loads(step1_str))
-
-        return step1_reply
+        step1_resp = getattr(ai_steps, f"{use_ai}_step_1")(PROMPT_SCAFFOLD, model_step1, openai_temperature)
+        print("Step 1 response:", step1_resp)
+        logger.info(json.loads(step1_resp))
+        return Step1Reply(**json.loads(step1_resp))
 
     except Exception as e:
         print("Step 1 error:", e)
         return jsonify({"error": f"Step 1 error: {e}"}), 500
 
 
-def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO):
+def generate_shapes(whiteboard: Whiteboard, step1_response, use_ai):
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
         raise ValueError("OPENAI_TEMPERATURE must be set in .env file")
@@ -362,31 +350,19 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: Receive
         # Get shapes optimization section with actual templates
         logger.info("[STEP2] Generating shapes prompt section with templates")
 
-        step2_content = [
-            {
-                "type": "text",
-                "text": step2_build(whiteboard, step1_response.update_description),
-            }
-        ]
+        PROMPT_SCAFFOLD = step2_build(whiteboard, step1_response.update_description)
 
-        openai_model_step2 = os.getenv("OPENAI_MODEL_STEP2")
-        if not openai_model_step2:
+        model_step2 = os.getenv(f"{use_ai.upper()}_MODEL_STEP2")
+        if not model_step2:
             raise ValueError("OPENAI_MODEL_STEP2 must be set in .env file")
-        logger.info(f"[STEP2] Sending request to OpenAI model: {openai_model_step2}")
+        logger.info(f"[STEP2] Sending request to OpenAI model: {model_step2}")
         logger.info(
-            f"[STEP2] Prompt length: {sum(len(str(c.get('text', ''))) for c in step2_content if isinstance(c, dict))} chars"
+            f"[STEP2] Prompt length: {len(PROMPT_SCAFFOLD)} chars"
         )
 
-        save_openai_prompt("STEP2", step2_content)
-
-        step2_resp = client.chat.completions.create(
-            model=openai_model_step2,
-            messages=[{"role": "user", "content": step2_content}],
-            temperature=openai_temperature,
-        )
-        step2_str = step2_resp.choices[0].message.content.strip()
-        logger.info(f"[STEP2] Received response from OpenAI ({len(step2_str)} chars)")
-        step2_json = json.loads(step2_str)
+        step2_resp = getattr(ai_steps, f"{use_ai}_step_2")(PROMPT_SCAFFOLD, model_step2, openai_temperature)
+        logger.info(f"[STEP2] Received response from OpenAI ({len(step2_resp)} chars)")
+        step2_json = json.loads(step2_resp)
         return step2_json
 
     except Exception as e:
@@ -409,6 +385,7 @@ def draw():
         if not is_valid:
             return jsonify({"error": f"Invalid payload: {validation_error}"}), 400
 
+        use_ai = os.getenv("USE_AI")
         receive_dto = ReceiveDTO(
             user_message=data.get("message"),  # Latest message that triggered the AI
             history=data.get("history"),  # The complete conversation history
@@ -426,7 +403,7 @@ def draw():
         whiteboard = Whiteboard.model_validate(whiteboard_state)
         final_whiteboard_dict = whiteboard.to_excalidraw_dict()
         intent_timer = time.time()
-        step1_response = describe_user_intent(whiteboard, receive_dto)
+        step1_response = describe_user_intent(whiteboard, receive_dto, use_ai)
         logger.info(f"Total time to assume describe user intent: {time.time() - intent_timer}s")
 
         if step1_response.should_update:
@@ -436,8 +413,8 @@ def draw():
             shape_timer = time.time()
             patches = generate_shapes(
                 whiteboard=whiteboard,
-                receive_dto=receive_dto,
                 step1_response=step1_response,
+                use_ai=use_ai
             )
             logger.info(f"Total time to generate shapes: {time.time() - shape_timer}s")
             whiteboard.apply_patches_from_ai(patches)
@@ -470,11 +447,6 @@ def draw():
                         "elements": final_whiteboard_dict["elements"],
                     }
                 )
-
-                input_untouched_whiteboard = {
-                    "appState": final_whiteboard_dict["appState"],
-                    "elements": final_whiteboard_dict["elements"],
-                }
             else:
                 response_json = json.dumps(
                     {
@@ -484,26 +456,6 @@ def draw():
                     }
                 )
 
-                input_untouched_whiteboard = {
-                    "appState": {},
-                    "elements": {},
-                }
-
-            # Try to get preview image, but don't fail if it errors
-            try:
-                get_whiteboard_image_preview(
-                    root_url=receive_dto.get_root_url_with_scheme(),
-                    whiteboard_json=input_untouched_whiteboard,
-                    save_name="no-draw-vision.jpg",
-                )
-            except Exception as e:
-                logger.warning(f"[STEP2] Failed to get whiteboard preview image: {e}")
-                # Continue without preview image
-
-            print("No draw response complete!")
-
-            with open("output.json", "w") as f:
-                json.dump(input_untouched_whiteboard, f, indent=4)
             try:
                 print("RECEIVING URL:", receive_dto.receiving_url, flush=True)
                 requests.post(
@@ -809,9 +761,9 @@ def receive2():
         STEP1_PROMPT_END = build_step1_decision_prompt_end()
 
         step1_content = (
-            [{"type": "text", "text": STEP1_PROMPT_START}]
-            + VISION_SCAFFOLD
-            + [{"type": "text", "text": STEP1_PROMPT_END}]
+                [{"type": "text", "text": STEP1_PROMPT_START}]
+                + VISION_SCAFFOLD
+                + [{"type": "text", "text": STEP1_PROMPT_END}]
         )
         # WE CAN NOW RUN STEP 1
         # Load OpenAI configuration (used in both try and else blocks)
@@ -1041,10 +993,10 @@ def receive2():
                 )
 
                 if (
-                    shape_exists
-                    and shape_name
-                    and shape_name != "custom"
-                    and shape_name != "none"
+                        shape_exists
+                        and shape_name
+                        and shape_name != "custom"
+                        and shape_name != "none"
                 ):
                     shape_template = load_shape_template(shape_name)
                     if shape_template and shape_template.get("elements"):
@@ -1264,7 +1216,7 @@ def receive2():
                         "be specific and engaging",
                     ]
                     if not ai_response or any(
-                        phrase in ai_response for phrase in placeholder_phrases
+                            phrase in ai_response for phrase in placeholder_phrases
                     ):
                         logger.warning(
                             f"[STEP1.5] Received placeholder text, generating fallback message"
@@ -1426,27 +1378,27 @@ def receive2():
                     )
                     if best_b64:
                         step2_content = (
-                            [{"type": "text", "text": step2_prompt_start}]
-                            + VISION_SCAFFOLD
-                            + [
-                                {
-                                    "type": "text",
-                                    "text": "To help you further, here's how your best attempt currently appears: ",
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{best_b64}"
+                                [{"type": "text", "text": step2_prompt_start}]
+                                + VISION_SCAFFOLD
+                                + [
+                                    {
+                                        "type": "text",
+                                        "text": "To help you further, here's how your best attempt currently appears: ",
                                     },
-                                },
-                            ]
-                            + [{"type": "text", "text": step2_prompt_end}]
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{best_b64}"
+                                        },
+                                    },
+                                ]
+                                + [{"type": "text", "text": step2_prompt_end}]
                         )
                     else:
                         step2_content = (
-                            [{"type": "text", "text": step2_prompt_start}]
-                            + VISION_SCAFFOLD
-                            + [{"type": "text", "text": step2_prompt_end}]
+                                [{"type": "text", "text": step2_prompt_start}]
+                                + VISION_SCAFFOLD
+                                + [{"type": "text", "text": step2_prompt_end}]
                         )
 
                     log_trustcall_event(
@@ -1911,21 +1863,21 @@ def trustcall_metrics_endpoint():
     """TrustCall metrics endpoint for monitoring dashboard"""
     try:
         webhook_success_rate = (
-            trustcall_metrics["webhook_successes"]
-            / max(trustcall_metrics["webhook_calls"], 1)
-        ) * 100
+                                       trustcall_metrics["webhook_successes"]
+                                       / max(trustcall_metrics["webhook_calls"], 1)
+                               ) * 100
         ai_success_rate = (
-            trustcall_metrics["ai_api_successes"]
-            / max(trustcall_metrics["ai_api_calls"], 1)
-        ) * 100
+                                  trustcall_metrics["ai_api_successes"]
+                                  / max(trustcall_metrics["ai_api_calls"], 1)
+                          ) * 100
         whiteboard_success_rate = (
-            trustcall_metrics["whiteboard_successes"]
-            / max(trustcall_metrics["whiteboard_generations"], 1)
-        ) * 100
+                                          trustcall_metrics["whiteboard_successes"]
+                                          / max(trustcall_metrics["whiteboard_generations"], 1)
+                                  ) * 100
         avg_response_time = (
             (
-                sum(trustcall_metrics["response_times"])
-                / len(trustcall_metrics["response_times"])
+                    sum(trustcall_metrics["response_times"])
+                    / len(trustcall_metrics["response_times"])
             )
             if trustcall_metrics["response_times"]
             else 0
