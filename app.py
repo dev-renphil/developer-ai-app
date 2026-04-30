@@ -244,6 +244,24 @@ def get_whiteboard_image_preview(root_url, whiteboard_json, save_name, verbose=T
             print(f"Failed to get image. Status code: {preview_response.status_code}")
 
 
+def get_whiteboard_image_bytes(root_url, whiteboard_json, verbose=True) -> bytes | None:
+    preview_url = root_url + WHITEBOARD_PREVIEW_API_SUFFIX
+    print("PREVIEW URL:", preview_url, flush=True)
+
+    preview_response = requests.post(
+        preview_url, json=whiteboard_json, headers={"Content-Type": "application/json"}
+    )
+
+    if preview_response.status_code == 200:
+        if verbose:
+            print("Image fetched successfully.")
+        return preview_response.content
+    else:
+        if verbose:
+            print(f"Failed to get image. Status code: {preview_response.status_code}")
+        return None
+
+
 def diarize_message(msg_tup, student_id, ai_id):
     if msg_tup["user_id"] == student_id:
         return {
@@ -319,7 +337,7 @@ def describe_user_intent(
     )
 
     # WE CAN NOW RUN STEP 1
-    model_step1 = os.getenv(f"{use_ai.upper()}_MODEL_STEP1")
+    model_step1 = os.getenv(f"{use_ai.upper()}_MODEL")
     if not model_step1:
         raise ValueError("OPENAI_MODEL_STEP1 must be set in .env file")
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
@@ -328,7 +346,8 @@ def describe_user_intent(
     openai_temperature = float(openai_temperature_str)
 
     try:
-        step1_resp = getattr(ai_steps, f"{use_ai}_step_1")(PROMPT_SCAFFOLD, model_step1, openai_temperature)
+        image_bytes = get_whiteboard_image_bytes(receive_dto.get_root_url_with_scheme(), whiteboard.model_dump())
+        step1_resp = getattr(ai_steps, f"call_{use_ai}_with_image_bytes")(PROMPT_SCAFFOLD, image_bytes, model_step1, openai_temperature)
         print("Step 1 response:", step1_resp)
         logger.info(json.loads(step1_resp))
         return Step1Reply(**json.loads(step1_resp))
@@ -338,7 +357,7 @@ def describe_user_intent(
         return jsonify({"error": f"Step 1 error: {e}"}), 500
 
 
-def generate_shapes(whiteboard: Whiteboard, step1_response, use_ai):
+def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO, use_ai):
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
         raise ValueError("OPENAI_TEMPERATURE must be set in .env file")
@@ -352,7 +371,7 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, use_ai):
 
         PROMPT_SCAFFOLD = step2_build(whiteboard, step1_response.update_description)
 
-        model_step2 = os.getenv(f"{use_ai.upper()}_MODEL_STEP2")
+        model_step2 = os.getenv(f"{use_ai.upper()}_MODEL")
         if not model_step2:
             raise ValueError("OPENAI_MODEL_STEP2 must be set in .env file")
         logger.info(f"[STEP2] Sending request to OpenAI model: {model_step2}")
@@ -360,7 +379,8 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, use_ai):
             f"[STEP2] Prompt length: {len(PROMPT_SCAFFOLD)} chars"
         )
 
-        step2_resp = getattr(ai_steps, f"{use_ai}_step_2")(PROMPT_SCAFFOLD, model_step2, openai_temperature)
+        image_bytes = get_whiteboard_image_bytes(receive_dto.get_root_url_with_scheme(), whiteboard.model_dump())
+        step2_resp = getattr(ai_steps, f"call_{use_ai}_with_image_bytes")(PROMPT_SCAFFOLD, image_bytes, model_step2, openai_temperature)
         logger.info(f"[STEP2] Received response from OpenAI ({len(step2_resp)} chars)")
         step2_json = json.loads(step2_resp)
         return step2_json
@@ -414,7 +434,8 @@ def draw():
             patches = generate_shapes(
                 whiteboard=whiteboard,
                 step1_response=step1_response,
-                use_ai=use_ai
+                use_ai=use_ai,
+                receive_dto=receive_dto
             )
             logger.info(f"Total time to generate shapes: {time.time() - shape_timer}s")
             whiteboard.apply_patches_from_ai(patches)

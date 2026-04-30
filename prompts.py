@@ -33,6 +33,7 @@ def step1_build(
         - The description should be specific enough for another system to generate or edit the whiteboard correctly.
         - Mention relevant spatial relationships when needed, such as left/right, above/below, overlap, same size, same x-coordinate, same y-coordinate, centered, aligned, inside, outside, touching, intersecting.
         - If colors, sizes, or existing distinctions matter, include them in the description.
+        - When creating a new object, make sure the object's id isn't already existing.
         
         Return ONLY valid JSON in this exact format:
         {{
