@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 class Step1Reply(BaseModel):
     should_update: bool
+    image_process: bool
     update_description: str
     text: str
 

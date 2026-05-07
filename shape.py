@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
@@ -274,6 +275,10 @@ class Whiteboard(BaseModel):
             el.model_dump(exclude_none=True) if hasattr(el, "model_dump") else el
             for el in self.elements
         ]
+        existing_ids = [el['id'] for el in existing_raw]
+        for patch in patches:
+            if patch["id"] in existing_ids and patch['create'] == True:
+                patch['id'] = patch['id'] + random.randint(0, 1000)
         patched_raw = apply_element_patches(existing_raw, patches)
         self.elements = [
             WhiteboardElement.model_validate(el)

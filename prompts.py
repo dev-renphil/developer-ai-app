@@ -34,10 +34,13 @@ def step1_build(
         - Mention relevant spatial relationships when needed, such as left/right, above/below, overlap, same size, same x-coordinate, same y-coordinate, centered, aligned, inside, outside, touching, intersecting.
         - If colors, sizes, or existing distinctions matter, include them in the description.
         - When creating a new object, make sure the object's id isn't already existing.
+        - Precise in your "text" attribute if you used the image or json to come to a conclusion
+        - The image_process attribute you're going to return is whether it's needed to send a snapshot of the whiteboard during the next prompt or is JSON whiteboard data enough. You will mainly need it to identify things like free drawings and element positions.
         
         Return ONLY valid JSON in this exact format:
         {{
           "should_update": true_or_false,
+          "image_process": true_or_false,
           "update_description": "precise description of the whiteboard change, or empty string if no update is needed",
           "text": "Reply that the student will see in the chat with the tutor, make it as humanly as possible, consider this a turing test and you're supposed to sound fully human"
         }}
@@ -56,6 +59,7 @@ def step2_build(whiteboard: Whiteboard, description: str):
         Do not use markdown.
         Do not wrap in ```json.
         Do not include any text before or after the JSON
+        All color values (strokeColor, backgroundColor) must be hex strings like #ff0000, never CSS named colors like red. Use transparent only for no background fill
         To update, create, or delete an element return valid JSON in this format:
         {json.dumps(Step2ExampleOutput)}
         allowed element attributes are:
