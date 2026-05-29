@@ -96,6 +96,9 @@ def call_gemini_with_image_bytes(prompt: str, image_bytes: bytes, model: str, te
             types.Part.from_bytes(data=image_bytes, mime_type=media_type),  # Gemini takes raw bytes directly
             prompt,
         ],
-        config=types.GenerateContentConfig(temperature=temperature),
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
     )
     return clean_json_response(resp.text)

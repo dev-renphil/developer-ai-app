@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from openai import OpenAI
 import requests
 import json
 import base64
@@ -7,6 +8,8 @@ import logging
 import re
 import uuid
 import random
+import math
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
@@ -19,6 +22,7 @@ from . import ai_steps
 from .ai_dtos import Step1Reply, ReceiveDTO
 from .shape import Whiteboard
 from .logging_helpers import log_openai_prompt, save_openai_prompt
+from . import sympy_operations as sympy_ops
 
 path = os.path.abspath("/transcriber_utils/")
 sys.path.insert(0, path)
@@ -41,6 +45,8 @@ from .transcriber_utils.sympy_operations import (
     perform_operation,
     should_draw_result,
     check_sympy_operation_available,
+    detect_operation_from_message,
+    compute_sector_points,
 )
 from .utils import encode_image_to_base64_compressed
 from .prompts import (
@@ -90,6 +96,8 @@ trustcall_metrics = {
     "payload_validation_errors": 0,
     "response_times": [],
 }
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # GLOBAL API SUFFIXES
 WHITEBOARD_PREVIEW_API_SUFFIX = os.getenv("WHITEBOARD_PREVIEW_API_SUFFIX")
@@ -297,7 +305,8 @@ LOOKBACK_LEN = int(lookback_len_str)
 def describe_user_intent(
         whiteboard,
         receive_dto: ReceiveDTO,
-        use_ai: str
+        use_ai: str,
+        pre_test_results: list | None = None,
 ):
     # TODO: Remove this once Musa adds the AI_ID and Student_ID as payload attributes
     parsed_url = urlparse(receive_dto.receiving_url)
@@ -334,6 +343,7 @@ def describe_user_intent(
         history_context=history_context,
         user_message=receive_dto.user_message,
         whiteboard=whiteboard,
+        pre_test_results=pre_test_results or [],
     )
 
     # WE CAN NOW RUN STEP 1
@@ -349,7 +359,23 @@ def describe_user_intent(
         step1_resp = getattr(ai_steps, f"call_{use_ai}")(PROMPT_SCAFFOLD, model_step1, openai_temperature)
         print("Step 1 response:", step1_resp)
         logger.info(json.loads(step1_resp))
-        return Step1Reply(**json.loads(step1_resp))
+        result = Step1Reply(**json.loads(step1_resp))
+
+        if result.image_process and result.operation in (None, "basic_draw"):
+            logger.info("[STEP1] image_process=true on basic/null op — retrying Step 1 with image")
+            try:
+                image_bytes = get_whiteboard_image_bytes(
+                    receive_dto.get_root_url_with_scheme(), whiteboard.model_dump()
+                )
+                step1_resp2 = getattr(ai_steps, f"call_{use_ai}_with_image_bytes")(
+                    PROMPT_SCAFFOLD, image_bytes, model_step1, openai_temperature
+                )
+                logger.info(f"[STEP1] image retry response: {step1_resp2}")
+                result = Step1Reply(**json.loads(step1_resp2))
+            except Exception as img_err:
+                logger.warning(f"[STEP1] image retry failed, using text-only result: {img_err}")
+
+        return result
 
     except Exception as e:
         print("Step 1 error:", e)
@@ -357,38 +383,47 @@ def describe_user_intent(
 
 
 def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO, use_ai: str, image_process: bool):
+    operation = step1_response.operation or "basic_draw"
+    logger.info(f"[STEP2] operation={operation} element_ids={step1_response.element_ids}")
+
+    op_fn = getattr(sympy_ops, operation, sympy_ops.basic_draw)
+    op_result = op_fn(whiteboard, step1_response.element_ids)
+
+    patches = op_result["patches"]
+    text_override = op_result.get("text", "")
+    response_text = text_override if text_override else step1_response.text
+
+    if patches is not None:
+        logger.info(f"[STEP2] Skipping AI — {len(patches)} patch(es) generated server-side")
+        return patches, response_text
+
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
         raise ValueError("OPENAI_TEMPERATURE must be set in .env file")
     openai_temperature = float(openai_temperature_str)
 
     try:
-        logger.info(f"[STEP2] Update description: {step1_response.update_description}")
-
-        # Get shapes optimization section with actual templates
-        logger.info("[STEP2] Generating shapes prompt section with templates")
-
-        PROMPT_SCAFFOLD = step2_build(whiteboard, step1_response.update_description)
-
+        PROMPT_SCAFFOLD = step2_build(whiteboard, step1_response.text)
         model_step2 = os.getenv(f"{use_ai.upper()}_MODEL")
         if not model_step2:
-            raise ValueError("OPENAI_MODEL_STEP2 must be set in .env file")
-        logger.info(f"[STEP2] Sending request to OpenAI model: {model_step2}")
-        logger.info(
-            f"[STEP2] Prompt length: {len(PROMPT_SCAFFOLD)} chars"
-        )
+            raise ValueError(f"{use_ai.upper()}_MODEL must be set in .env file")
+        logger.info(f"[STEP2] Sending request to {use_ai} model: {model_step2}")
 
         if image_process:
             image_bytes = get_whiteboard_image_bytes(receive_dto.get_root_url_with_scheme(), whiteboard.model_dump())
             step2_resp = getattr(ai_steps, f"call_{use_ai}_with_image_bytes")(PROMPT_SCAFFOLD, image_bytes, model_step2, openai_temperature)
         else:
             step2_resp = getattr(ai_steps, f"call_{use_ai}")(PROMPT_SCAFFOLD, model_step2, openai_temperature)
-        logger.info(f"[STEP2] Received response from OpenAI ({len(step2_resp)} chars)")
-        step2_json = json.loads(step2_resp)
-        return step2_json
+        logger.info(f"[STEP2] Received response ({len(step2_resp)} chars)")
+        parsed = json.loads(step2_resp)
+        # Normalise: AI may return a single patch dict instead of a list
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        return parsed, response_text
 
     except Exception as e:
-        print(f"Step 2 error", e)
+        logger.error(f"Step 2 error: {e}", exc_info=True)
+        return [], response_text
 
 
 @app.route("/draw", methods=["POST"])
@@ -399,7 +434,7 @@ def draw():
     logger.info("=" * 80)
 
     try:
-        data = request.get_json()  # Get the payload from the end user
+        data = request.get_json()
         logger.info("Payload received, starting processing")
 
         # TrustCall: Validate webhook payload
@@ -420,20 +455,19 @@ def draw():
             topic=data.get(
                 "topic"
             ),  # Topic, which will be useful in case we need to build a hard-coded AI per topic
+            pre_test_results=data.get("pre_test_results") or [],
         )
         whiteboard_state = data.get("whiteboard_state") or {}
         whiteboard = Whiteboard.model_validate(whiteboard_state)
         final_whiteboard_dict = whiteboard.to_excalidraw_dict()
         intent_timer = time.time()
-        step1_response = describe_user_intent(whiteboard, receive_dto, use_ai)
+        step1_response = describe_user_intent(whiteboard, receive_dto, use_ai, receive_dto.pre_test_results)
         logger.info(f"Total time to assume describe user intent: {time.time() - intent_timer}s")
 
-        if step1_response.should_update:
-            logger.info("\n")
-            logger.info("Board should be updated!")
-            logger.info("\n")
+        if step1_response.operation is not None:
+            logger.info(f"Board should be updated! operation={step1_response.operation}")
             shape_timer = time.time()
-            patches = generate_shapes(
+            patches, response_text = generate_shapes(
                 whiteboard=whiteboard,
                 step1_response=step1_response,
                 use_ai=use_ai,
@@ -441,18 +475,19 @@ def draw():
                 image_process=step1_response.image_process
             )
             logger.info(f"Total time to generate shapes: {time.time() - shape_timer}s")
-            whiteboard.apply_patches_from_ai(patches)
+            if patches:
+                whiteboard.apply_patches_from_ai(patches)
             final_whiteboard_dict = whiteboard.to_excalidraw_dict()
 
             response_json = json.dumps(
                 {
-                    "text": step1_response.text,
+                    "text": response_text,
                     "appState": final_whiteboard_dict["appState"],
                     "elements": final_whiteboard_dict["elements"],
                 }
             )
 
-            logger.info(f"response json: {response_json}")
+            # logger.info(f"response json: {response_json}")
 
             requests.post(
                 receive_dto.receiving_url,
@@ -491,7 +526,7 @@ def draw():
                 logger.error("Exception found: ", e)
                 raise
 
-        logger.info(f"response json: {response_json}")
+        # logger.info(f"response json: {response_json}")
         logger.info(f"Total time: {time.time() - start_time}s")
         return jsonify({"status": "sent", "reply": response_json}), 200
 
@@ -819,8 +854,16 @@ def receive2():
                 temperature=openai_temperature,
             )
             step1_str = step1_resp.choices[0].message.content.strip()
+            # Strip markdown fences the model sometimes wraps around JSON
+            if step1_str.startswith("```"):
+                step1_str = re.sub(r"^```[a-zA-Z]*\n?", "", step1_str)
+                step1_str = re.sub(r"\n?```$", "", step1_str).strip()
             print("Step 1 response:", step1_str)
-            step1_json = json.loads(step1_str)
+            if not step1_str:
+                logger.warning("[STEP1] Empty response from model — defaulting to no-draw")
+                step1_json = {"update_decision": False, "update_description": "", "mathematical_operation": None}
+            else:
+                step1_json = json.loads(step1_str)
             # Parse the outputs
             draw_on_whiteboard = bool(step1_json.get("update_decision", False))
             what_to_draw = step1_json.get("update_description", "")

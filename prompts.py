@@ -1,8 +1,28 @@
 from typing import Dict, Any, List
+from toon_format import encode
 import json
 
 from .ai_dtos import Step2ExampleOutput, Step2ExampleElement
 from .shape import Whiteboard
+
+
+def _format_pre_test_results(pre_test_results: list) -> str:
+    if not pre_test_results:
+        return ""
+    lines = ["STUDENT PRE-TEST — questions answered INCORRECTLY (weak areas):"]
+    for i, result in enumerate(pre_test_results, 1):
+        topic = result.get("topic", "N/A")
+        question = result.get("question", "N/A")
+        student_answer = result.get("student_answer", "N/A")
+        correct_answer = result.get("correct_answer", "N/A")
+        lines.append(f"{i}. Topic: {topic}")
+        lines.append(f"Question: {question}")
+        lines.append(f"Student answered: {student_answer}  |  Correct answer: {correct_answer}")
+    lines.append(
+        "→ Prioritize these topics in your explanations. When the student's question "
+        "touches any of these areas, go deeper, use examples, and check their understanding carefully."
+    )
+    return "\n".join(lines)
 
 
 def step1_build(
@@ -10,61 +30,94 @@ def step1_build(
     history_context: str,
     user_message: str,
     whiteboard: Whiteboard,
+    pre_test_results: list | None = None,
 ) -> str:
+    whiteboard_encoded = encode('{"board": ' + str(whiteboard.get_whiteboard_state()) + ', "elements": ' + str(whiteboard.get_whiteboard_elements()) + '}')
+    pre_test_block = _format_pre_test_results(pre_test_results or [])
     return f"""
-        You are an internal planning assistant for a tutoring whiteboard system. Your job in this step is ONLY to decide whether the whiteboard should be updated, 
-        and if so, describe exactly what should change. Do NOT generate Excalidraw JSON. Do NOT write the final student-facing reply. Do NOT explain your reasoning.
+        You are an internal planning assistant for a tutoring whiteboard system.
         The tutoring topic is: "{topic}".
+        {pre_test_block}
         Conversation history:
         {history_context}
         Latest student message:
         "{user_message}"
         Current whiteboard state:
+        {whiteboard_encoded}
+
+        Your job: decide what operation (if any) to perform on the whiteboard and reply to the student.
+
+        OPERATIONS — pick exactly one, or null if no whiteboard change is needed:
+        - null: purely conversational, no drawing needed
+        - "basic_draw": draw, move, resize, recolor, delete, or any generic whiteboard edit
+        - "circle_center": mark the center point of one or more circles
+        - "triangle_orthocenter": mark the orthocenter of one or more triangles
+        - "intersection": shade or mark the intersection region/points of two shapes
+        - "circle_area": compute and state the area of one or more circles
+        - "is_parallel": check and state whether two line elements are parallel
+        - "is_intersecting": check and state whether two elements intersect
+        - "parallel": draw a new line parallel to an existing one
+
+        RULES:
+        - element_ids: list the IDs of the whiteboard elements the operation acts on.
+          For basic_draw or null, leave it as an empty list [].
+        - text: write a SHORT, natural reply to the student (1-2 sentences).
+          For operations that draw something, the text must also describe WHAT to draw and WHERE
+          (e.g. "I'll mark the center of circle_1 for you." or "Here's a triangle on the whiteboard.").
+          This text is reused as the Step-2 drawing instruction, so be specific about what should appear.
+        - image_process: MUST be true if ANY of the following apply:
+            * the whiteboard contains freedraw elements
+            * the student uses words like "circled", "marked", "highlighted", "pointed", "these", "those", "the ones I", "that one", "this one" to refer to elements — if you cannot determine EXACTLY which elements they mean from the JSON alone, set true
+            * the student references elements by position ("the one on the left", "top right", "the bigger one") rather than by explicit id or label
+          Set false ONLY when you can identify all referenced elements with certainty from the JSON data alone.
+        - When creating new elements, do NOT reuse an existing element id.
+
+        Return ONLY valid JSON, no explanation, no markdown:
         {{
-          "board": {whiteboard.get_whiteboard_state()},
-          "elements": {whiteboard.get_whiteboard_elements()},
-        }}
-        Instructions:
-        - Return should_update=true if the student explicitly or implicitly requests a visual change.
-        - Visual changes include: drawing, adding, moving, resizing, recoloring, deleting, aligning, rearranging, labeling, connecting, or modifying existing objects.
-        - Return should_update=false for greetings, acknowledgements, or purely conversational turns with no needed whiteboard change.
-        - If the student refers to existing objects (for example: "move them", "make them vertical", "put one above the other", "change the red one"), use the current whiteboard elements to infer what is being referenced.
-        - If should_update=true, write a precise update_description describing the intended final whiteboard result.
-        - The description should be specific enough for another system to generate or edit the whiteboard correctly.
-        - Mention relevant spatial relationships when needed, such as left/right, above/below, overlap, same size, same x-coordinate, same y-coordinate, centered, aligned, inside, outside, touching, intersecting.
-        - If colors, sizes, or existing distinctions matter, include them in the description.
-        - When creating a new object, make sure the object's id isn't already existing.
-        - Precise in your "text" attribute if you used the image or json to come to a conclusion
-        - The image_process attribute you're going to return is whether it's needed to send a snapshot of the whiteboard during the next prompt or is JSON whiteboard data enough. You will mainly need it to identify things like free drawings and element positions.
-        
-        Return ONLY valid JSON in this exact format:
-        {{
-          "should_update": true_or_false,
+          "operation": "basic_draw" | "circle_center" | "triangle_orthocenter" | "intersection" | "circle_area" | "is_parallel" | "is_intersecting" | "parallel" | null,
+          "element_ids": [],
           "image_process": true_or_false,
-          "update_description": "precise description of the whiteboard change, or empty string if no update is needed",
-          "text": "Reply that the student will see in the chat with the tutor, make it as humanly as possible, consider this a turing test and you're supposed to sound fully human"
+          "text": "short student-facing reply that also describes the drawing action"
         }}
         """
 
 def step2_build(whiteboard: Whiteboard, description: str):
+    whiteboard_encoded = encode('{"board": ' + str(whiteboard.get_whiteboard_state()) + ', "elements": ' + str(whiteboard.get_whiteboard_elements()) + '}')
     return f"""
         {description}
-        {{
-          "board": {whiteboard.get_whiteboard_state()},
-          "elements": {whiteboard.get_whiteboard_elements()},
-        }}
-        CRITICAL OUTPUT RULE:
-        Return ONLY valid JSON.
+        {whiteboard_encoded}
+        CRITICAL OUTPUT RULES:
+        Return ONLY valid JSON. 
         Do not explain.
         Do not use markdown.
         Do not wrap in ```json.
-        Do not include any text before or after the JSON
-        All color values (strokeColor, backgroundColor) must be hex strings like #ff0000, never CSS named colors like red. Use transparent only for no background fill
+        Do not include any text before or after the JSON.
+        All color values (strokeColor, backgroundColor) must be hex strings like #ff0000, never CSS named colors like red. Use transparent only for no background fill.
+        The "type" field of every element you create MUST be one of these exact strings:
+        "rectangle" | "ellipse" | "line" | "arrow" | "text" | "freedraw"
+        Any other type value will be silently ignored by Excalidraw and nothing will appear on screen.
+        STYLE DEFAULTS — always set these unless the user explicitly asks for a different style:
+        - roughness: 0  (clean precise lines — never use 1 or 2, those produce a hand-drawn sketch effect)
+        - fillStyle: "solid" if the shape should be filled, "transparent" if it should be empty (never "hachure" or "cross-hatch")
+        STRICT LINE / ARROW RULE:
+        Every "line" or "arrow" element MUST include a "points" array with at least 2 entries.
+        The first point MUST always be [0, 0]. The element's (x, y) is the absolute canvas position of that first point.
+        All subsequent points are offsets relative to (x, y).
+          Correct:  x=100, y=200, points=[[0,0],[80,0]]
+          Wrong:    x=100, y=200, points=[[80,0],[0,0]]  ← first point not [0,0]
+        A "line" with an empty or missing "points" array will crash the renderer.
+        CLOSED POLYGON RULE:
+        Draw triangles and other closed shapes as a SINGLE "line" element whose last point equals [0,0]:
+          points: [[0,0],[100,0],[50,86],[0,0]]
+        Never split a triangle into 3 separate line elements — always use one closed line element.
+        STRICT FILLED-DOT RULE:
+        When drawing a small dot or centre marker (width ≤ 8, fillStyle "solid"), set backgroundColor to the same value as strokeColor — never "transparent". A transparent backgroundColor produces an invisible ring, not a visible dot.
+
         To update, create, or delete an element return valid JSON in this format:
         {json.dumps(Step2ExampleOutput)}
-        allowed element attributes are:
+        Allowed element attributes are:
         {json.dumps(Step2ExampleElement)}
-        Remember these attributes are part of Excalidraw JSON, use Excalidraw version 0.18+ so that it don't miss any part which may breaks the excalidraw.
+        Remember these attributes are part of Excalidraw JSON, use Excalidraw version 0.18+.
         """
 
 

@@ -1,25 +1,37 @@
 import json
 import logging
+import math
 from typing import Dict, Any, List, Optional
 from sympy import Point, Line, Circle, Polygon, Segment
 
 logger = logging.getLogger(__name__)
 
 # Available sympy operations
+# Maps operation name → the single SymPy call used.
+# Excalidraw "line"/"arrow" elements are always bounded → Segment, never Line.
+# Excalidraw "ellipse" (circle) → Circle.
+# Excalidraw "rectangle"/"diamond" → Polygon.
 SYMPY_OPERATIONS = {
-    "intersection": ["Line.intersection()", "Circle.intersection()", "Polygon.intersection()"],
-    "parallel": ["Line.is_parallel()", "Segment.is_parallel()"],
-    "perpendicular": ["Segment.is_perpendicular()", "Line.angle_between()"],
-    "angle": ["Line.angle_between()"],
-    "distance": ["Point.distance()", "Line.distance()"],
-    "contains": ["Polygon.encloses_point()", "Line.contains()", "Circle.contains()"],
-    "area": ["Polygon.area", "Circle.area"],
-    "perimeter": ["Polygon.perimeter", "Circle.circumference"],
-    "tangent": ["Circle.intersection()"],  
-    "midpoint": ["Point.midpoint()"],
+    "intersection":  "Segment.intersection() / Circle.intersection()",
+    "parallel":      "Segment.is_parallel()",
+    "perpendicular": "Segment.is_perpendicular()",
+    "angle":         "Segment.angle_between()",
+    "distance":      "Point.distance() / Segment.distance()",
+    "contains":      "Polygon.encloses_point() / Circle.encloses_point()",
+    "area":          "Polygon.area / Circle.area",
+    "perimeter":     "Polygon.perimeter / Circle.circumference",
+    "tangent":       "Circle.intersection()",
+    "midpoint":      "Segment.midpoint",
 }
 
- 
+
+GEO_OPERATIONS = {
+    "intersection_shading": "",
+    "draw_triangle_orthocenter": "",
+    "draw_circle_slice": "",
+    "draw_intersection_section": "",
+    "is_intersecting": ""
+}
 def check_sympy_operation_available(operation: str) -> bool:
     """
     Check if an operation is available in sympy.
@@ -70,17 +82,9 @@ def perform_intersection(obj1: Any, obj2: Any) -> Dict[str, Any]:
 
 
 def perform_parallel_check(obj1: Any, obj2: Any) -> Dict[str, Any]:
-    """Check if two lines are parallel using sympy."""
+    """Check if two segments are parallel using sympy."""
     try:
-        if isinstance(obj1, Line) and isinstance(obj2, Line):
-            is_parallel = obj1.is_parallel(obj2)
-            return {
-                "success": True,
-                "operation": "parallel",
-                "result": bool(is_parallel),
-                "message": "Lines are parallel" if is_parallel else "Lines are not parallel"
-            }
-        elif isinstance(obj1, Segment) and isinstance(obj2, Segment):
+        if isinstance(obj1, Segment) and isinstance(obj2, Segment):
             is_parallel = obj1.is_parallel(obj2)
             return {
                 "success": True,
@@ -88,11 +92,11 @@ def perform_parallel_check(obj1: Any, obj2: Any) -> Dict[str, Any]:
                 "result": bool(is_parallel),
                 "message": "Segments are parallel" if is_parallel else "Segments are not parallel"
             }
-        
+
         return {
             "success": False,
             "operation": "parallel",
-            "message": "Parallel check only available for Line or Segment objects"
+            "message": "Parallel check requires two Segment objects (Excalidraw 'line'/'arrow' elements)"
         }
     except Exception as e:
         logger.error(f"Error checking parallel: {e}")
@@ -372,6 +376,51 @@ def should_draw_result(operation: str, user_message: str) -> bool:
         return True
     
     return False
+
+
+def compute_sector_points(element: Dict[str, Any], angle_deg: float) -> Dict[str, Any]:
+    """
+    Pre-compute the arc/sector points for a pie-slice or sector shape.
+
+    Given an ellipse/circle Excalidraw element and a sweep angle, returns the
+    centre, radius, and a ready-to-use list of relative freedraw points that
+    the AI can copy directly into a freedraw element to draw the sector.
+
+    Args:
+        element:   Excalidraw element dict (needs x, y, width, height).
+        angle_deg: Sweep angle of the sector in degrees (0–360).
+
+    Returns:
+        Dictionary with cx, cy, r, angle_deg, and freedraw_points (relative).
+    """
+    try:
+        cx = element["x"] + element["width"] / 2.0
+        cy = element["y"] + element["height"] / 2.0
+        r = min(element["width"], element["height"]) / 2.0
+        angle_rad = math.radians(angle_deg)
+
+        # Build relative arc points (origin = cx, cy)
+        steps = max(36, int(angle_deg))  # at least 1 point per degree
+        points = [[0.0, 0.0]]  # start at centre
+        for i in range(steps + 1):
+            t = (i / steps) * angle_rad
+            px = r * math.cos(t)
+            py = r * math.sin(t)
+            points.append([round(px, 2), round(py, 2)])
+        points.append([0.0, 0.0])  # close back to centre
+
+        return {
+            "success": True,
+            "cx": round(cx, 2),
+            "cy": round(cy, 2),
+            "r": round(r, 2),
+            "angle_deg": angle_deg,
+            "freedraw_points": points,
+        }
+    except Exception as e:
+        logger.error(f"Error computing sector points: {e}")
+        return {"success": False, "error": str(e)}
+
 
 
 def analyze_freedraw_with_llm(freedraw_element: Dict[str, Any], openai_client=None) -> Optional[Dict[str, Any]]:

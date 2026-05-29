@@ -1,13 +1,13 @@
 from typing import Any
 from urllib.parse import urlparse, parse_qs
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Step1Reply(BaseModel):
-    should_update: bool
+    operation: str | None
+    element_ids: list[str]
     image_process: bool
-    update_description: str
     text: str
 
 
@@ -17,7 +17,7 @@ class ReceiveDTO(BaseModel):
     session_id: Any
     receiving_url: Any
     topic: Any
-    session_id: Any
+    pre_test_results: list[Any] = Field(default_factory=list)
 
     def get_root_url_with_scheme(self):
         parsed_url = urlparse(self.receiving_url)
@@ -29,7 +29,7 @@ class ReceiveDTO(BaseModel):
 
 
 Step2ExampleOutput = [
-    {"id": "1", "changes": {"strokeColor": "red"}},
+    {"id": "1", "changes": {"strokeColor": "#ff0000"}},
     {"id": "2", "changes": {"x": 50, "y": 150}},
     {"id": "3", "delete": True},
     {
@@ -56,5 +56,5 @@ Step2ExampleElement = {
     "height": 300.4,
     "angle": 0,
     "strokeColor": "#000000",
-    "backgroundColor": "#ced4d43",
+    "backgroundColor": "transparent",
 }

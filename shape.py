@@ -25,10 +25,12 @@ class Stats(BaseModel):
 
 
 class ActiveTool(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
     type: Optional[str] = None
     locked: bool = False
     customType: Optional[str] = None
-    lastActiveTool: Optional[str] = None
+    lastActiveTool: Optional[Any] = None
 
 
 class FrameRendering(BaseModel):
@@ -270,15 +272,18 @@ class Whiteboard(BaseModel):
     def set_whiteboard_elements(self, elements_data: list[dict[str, Any]]) -> None:
         self.elements = [WhiteboardElement.model_validate(e) for e in elements_data]
 
-    def apply_patches_from_ai(self, patches: list[dict]) -> None:
+    def apply_patches_from_ai(self, patches) -> None:
+        # AI occasionally returns a single patch dict instead of a list — normalise
+        if isinstance(patches, dict):
+            patches = [patches]
         existing_raw = [
             el.model_dump(exclude_none=True) if hasattr(el, "model_dump") else el
             for el in self.elements
         ]
         existing_ids = [el['id'] for el in existing_raw]
         for patch in patches:
-            if patch["id"] in existing_ids and patch['create'] == True:
-                patch['id'] = patch['id'] + random.randint(0, 1000)
+            if patch["id"] in existing_ids and patch.get('create') is True:
+                patch['id'] = str(patch['id']) + str(random.randint(1000, 9999))
         patched_raw = apply_element_patches(existing_raw, patches)
         self.elements = [
             WhiteboardElement.model_validate(el)
