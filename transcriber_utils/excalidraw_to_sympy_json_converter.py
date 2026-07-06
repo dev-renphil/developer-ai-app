@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Callable, Optional
 from sympy import Point, Polygon, Circle, RegularPolygon, Triangle, Segment, Line
 from sympy import symbols, lambdify, sin
 
-from transcriber_utils.sympy_base_value_function import make_id, get_default_app_state 
+from .sympy_base_value_function import make_id, get_default_app_state
 
 logger = logging.getLogger(__name__)
 
