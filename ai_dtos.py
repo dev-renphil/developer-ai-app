@@ -6,9 +6,11 @@ from pydantic import BaseModel, Field
 
 class Step1Reply(BaseModel):
     operation: str | None
-    element_ids: list[str]
+    element_ids: list[str] = []
+    operation_params: dict = Field(default_factory=dict)
     image_process: bool
     text: str
+    instruction: str = ""
 
 
 class ReceiveDTO(BaseModel):
@@ -17,7 +19,7 @@ class ReceiveDTO(BaseModel):
     session_id: Any
     receiving_url: Any
     topic: Any
-    pre_test_results: list[Any] = Field(default_factory=list)
+    pre_test_details: list[Any] | None = None
 
     def get_root_url_with_scheme(self):
         parsed_url = urlparse(self.receiving_url)

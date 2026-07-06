@@ -57,11 +57,19 @@ def build_new_full_element_from_ai(ai_element: Dict[str, Any]) -> Dict[str, Any]
 
     base.update(ai_element)
 
-    # Recompute width/height from points for linear/freedraw elements so
-    # Excalidraw gets a correct bounding box (AI often sets both to 0).
+    # Normalise points for linear/freedraw elements:
+    # - First point must be [0, 0]; if the LLM used absolute canvas coords,
+    #   shift all points by (-first_x, -first_y) and add the offset to x/y.
+    # - Recompute width/height from the normalised points.
     if base.get("type") in ("line", "arrow", "freedraw"):
         points = base.get("points") or []
         if points:
+            first_x, first_y = points[0][0], points[0][1]
+            if first_x != 0 or first_y != 0:
+                points = [[p[0] - first_x, p[1] - first_y] for p in points]
+                base["x"] = round(base.get("x", 0) + first_x, 4)
+                base["y"] = round(base.get("y", 0) + first_y, 4)
+                base["points"] = points
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             base["width"] = round(max(xs) - min(xs), 4)
@@ -94,7 +102,12 @@ def apply_element_patches(
             if not el_type:
                 raise ValueError(f"Create patch for '{el_id}' missing 'type'")
 
-            changes = deepcopy(patch.get("changes", {}))
+            changes = deepcopy(patch.get("changes") or {})
+            # If Gemini puts geometry at patch top-level instead of inside "changes", merge it in
+            _META = {"id", "type", "create", "delete", "_skipped", "changes"}
+            for k, v in patch.items():
+                if k not in _META and k not in changes:
+                    changes[k] = deepcopy(v)
             changes["id"] = el_id
             changes["type"] = el_type
 
@@ -115,6 +128,14 @@ def apply_element_patches(
         changes = patch.get("changes", {})
         if not isinstance(changes, dict):
             raise ValueError(f"Patch for '{el_id}' must contain a dict 'changes'")
+
+        # When text content changes, keep originalText in sync and recompute dimensions
+        if "text" in changes:
+            changes.setdefault("originalText", changes["text"])
+            font_size = elements_by_id[el_id].get("fontSize", 20) or 20
+            text_len = len(changes["text"])
+            changes.setdefault("width", max(80, font_size * 0.6 * text_len))
+            changes.setdefault("height", max(24, font_size * 1.4))
 
         elements_by_id[el_id].update(changes)
 

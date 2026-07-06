@@ -6,22 +6,34 @@ from .ai_dtos import Step2ExampleOutput, Step2ExampleElement
 from .shape import Whiteboard
 
 
-def _format_pre_test_results(pre_test_results: list) -> str:
-    if not pre_test_results:
+def _format_pre_test_details(pre_test_details: list | None) -> str:
+    if not pre_test_details:
         return ""
+
+    wrong = [q for q in pre_test_details if q.get("is_correct") is False]
+
+    if not wrong:
+        return "STUDENT PRE-TEST RESULT: all answers were correct."
+
     lines = ["STUDENT PRE-TEST — questions answered INCORRECTLY (weak areas):"]
-    for i, result in enumerate(pre_test_results, 1):
-        topic = result.get("topic", "N/A")
-        question = result.get("question", "N/A")
-        student_answer = result.get("student_answer", "N/A")
-        correct_answer = result.get("correct_answer", "N/A")
-        lines.append(f"{i}. Topic: {topic}")
-        lines.append(f"Question: {question}")
-        lines.append(f"Student answered: {student_answer}  |  Correct answer: {correct_answer}")
-    lines.append(
-        "→ Prioritize these topics in your explanations. When the student's question "
-        "touches any of these areas, go deeper, use examples, and check their understanding carefully."
-    )
+    for i, q in enumerate(wrong, 1):
+        topic = q.get("topic") or "unknown topic"
+        question = q.get("description") or q.get("question") or q.get("question_text") or ""
+        student_ans = q.get("student_answer") or q.get("selected_answer") or ""
+        right = q.get("right_answer") or q.get("correct_answer") or "?"
+        line = f"  {i}. Topic: {topic!r}"
+        if question:
+            line += f" | Question: {question!r}"
+        if student_ans:
+            line += f" | Student answered: {student_ans!r}"
+        line += f" | Correct answer: {right!r}"
+        lines.append(line)
+
+    weak_topics = list(dict.fromkeys(
+        q["topic"] for q in wrong if q.get("topic")
+    ))
+    if weak_topics:
+        lines.append(f"→ Weak areas: {', '.join(weak_topics)}.")
     return "\n".join(lines)
 
 
@@ -30,10 +42,87 @@ def step1_build(
     history_context: str,
     user_message: str,
     whiteboard: Whiteboard,
-    pre_test_results: list | None = None,
+    pre_test_details: list | None = None,
+) -> str:
+    whiteboard_encoded = encode(
+        '{"board": '
+        + str(whiteboard.get_whiteboard_state())
+        + ', "elements": '
+        + str(whiteboard.get_whiteboard_elements())
+        + "}"
+    )
+    pre_test_block = _format_pre_test_details(pre_test_details)
+
+    return f"""
+You route requests for a math tutoring whiteboard.
+
+Topic: "{topic}"
+{pre_test_block}
+
+History:
+{history_context}
+
+Student:
+"{user_message}"
+
+Board:
+{whiteboard_encoded}
+
+Choose exactly one operation:
+- null: chat reply only; do not change the board
+- basic_draw: create, move, resize, recolor, or delete generic board elements
+- circle_center: mark the center of existing circle(s)
+- triangle_orthocenter: mark the orthocenter of existing triangle(s)
+- intersection: shade only the overlapping region of existing elements
+- circle_area: calculate the area of existing circle(s)
+- polygon_area: calculate the area of existing closed shapes
+- is_parallel: check whether existing lines are parallel
+- is_intersecting: check whether existing elements intersect
+- parallel: draw a new line parallel to selected existing line(s)
+- perpendicular: create or adjust line(s) to be perpendicular
+- is_perpendicular: check whether existing lines are perpendicular
+- circle_sector: draw a filled sector inside an existing circle; requires angle in degrees
+- parallelogram_height: draw the perpendicular height line (with right-angle marker) on an existing parallelogram and report its length
+- angle_measure: compute and state the interior angles of a polygon, or the angle a line makes with the horizontal
+
+Rules:
+- Default to null.
+- basic_draw is ONLY valid when: (a) the student message contains an explicit draw verb directed at the board: "draw", "show me on the board", "add", "put", "create", "delete", "move", "resize", "recolor"; OR (b) you offered to draw in your immediately preceding reply and the student is responding affirmatively (e.g. "yes", "sure", "go ahead", "please"). No other phrasing qualifies.
+- Questions, explanations, greetings, "what is", "explain", "help", "teach", "how does", "tell me", "I understand", "ok", "thanks" — always null, no exceptions.
+- Never draw a diagram proactively. Only draw when the student explicitly commands it or accepts your offer.
+- When explaining a concept that is inherently visual (geometry, coordinate systems, graphs, shapes, transformations), you MAY end your text reply with a single short offer such as "Want me to show this on the board?" — but only when a diagram would genuinely add clarity, not as a default. Do not offer on numerical or purely algebraic topics unless there is a clear spatial component. Never offer AND draw in the same turn.
+- If the conversation history is empty (this is the student's first message) and the pre-test shows incorrect answers, open your reply by acknowledging one weak area before addressing their question. Example: "I noticed you missed the pretest question on [topic] — want to go over it together?" Keep it natural and brief.
+- If the student's current question or the ongoing topic matches a pre-test weak area, naturally weave in a reference: point out the connection, go deeper, and check understanding. Do not force this on every message — only when the link is direct and relevant.
+- If unclear which existing board element is meant, use null.
+- instruction describes only raw geometry: shape type, size, position, color. Nothing else.
+  WRONG: "Draw a parallelogram with a dashed height line and right-angle symbol to show area."
+  RIGHT: "Draw a parallelogram centered at (500,400), width 300, height 150, no fill, black stroke."
+- element_ids = existing element IDs being changed or used; otherwise [].
+- Never reuse existing IDs.
+- image_process is true only for freedraw or vague positional references.
+- text must be plain text only. No markdown, no asterisks, no bold, no bullet points, no dollar signs, no LaTeX. 1-2 sentences maximum.
+
+Return JSON only:
+{{
+  "operation": "basic_draw" | "circle_center" | "triangle_orthocenter" | "intersection" | "circle_area" | "polygon_area" | "is_parallel" | "is_perpendicular" | "is_intersecting" | "parallel" | "perpendicular" | "circle_sector" | "parallelogram_height" | "angle_measure" | null,
+  "element_ids": [],
+  "operation_params": {{}},
+  "image_process": true_or_false,
+  "text": "short reply",
+  "instruction": "drawing instruction or empty string"
+}}
+"""
+
+
+def old_step1_build(
+    topic: str,
+    history_context: str,
+    user_message: str,
+    whiteboard: Whiteboard,
+    pre_test_details: list | None = None,
 ) -> str:
     whiteboard_encoded = encode('{"board": ' + str(whiteboard.get_whiteboard_state()) + ', "elements": ' + str(whiteboard.get_whiteboard_elements()) + '}')
-    pre_test_block = _format_pre_test_results(pre_test_results or [])
+    pre_test_block = _format_pre_test_details(pre_test_details)
     return f"""
         You are an internal planning assistant for a tutoring whiteboard system.
         The tutoring topic is: "{topic}".
@@ -45,49 +134,134 @@ def step1_build(
         Current whiteboard state:
         {whiteboard_encoded}
 
-        Your job: decide what operation (if any) to perform on the whiteboard and reply to the student.
+        Your job: decide what single operation (if any) to perform on the whiteboard and reply to the student.
 
-        OPERATIONS — pick exactly one, or null if no whiteboard change is needed:
+        AVAILABLE OPERATIONS:
         - null: purely conversational, no drawing needed
         - "basic_draw": draw, move, resize, recolor, delete, or any generic whiteboard edit
         - "circle_center": mark the center point of one or more circles
         - "triangle_orthocenter": mark the orthocenter of one or more triangles
-        - "intersection": shade or mark the intersection region/points of two shapes
+        - "intersection": shade the intersection region of two or more EXISTING elements on the whiteboard (only when the student explicitly asks to shade/highlight an intersection of elements already on the board — never use this to draw new shapes)
         - "circle_area": compute and state the area of one or more circles
-        - "is_parallel": check and state whether two line elements are parallel
-        - "is_intersecting": check and state whether two elements intersect
-        - "parallel": draw a new line parallel to an existing one
+        - "polygon_area": compute and state the area of one or more polygons, rectangles, or any closed shape (parallelogram, triangle, etc.)
+        - "is_parallel": check and state whether the given line elements are parallel
+        - "is_intersecting": check and state whether the given elements intersect
+        - "parallel": draw a new line parallel to each given line
+        - "perpendicular": rotate every 2nd line to be perpendicular to the 1st, or create a fresh perpendicular pair
+        - "is_perpendicular": check and state whether the given line elements are perpendicular
+        - "circle_sector": draw a filled pie-slice sector on a circle; include operation_params with "angle" in degrees
 
         RULES:
-        - element_ids: list the IDs of the whiteboard elements the operation acts on.
-          For basic_draw or null, leave it as an empty list [].
-        - text: write a SHORT, natural reply to the student (1-2 sentences).
-          For operations that draw something, the text must also describe WHAT to draw and WHERE
-          (e.g. "I'll mark the center of circle_1 for you." or "Here's a triangle on the whiteboard.").
-          This text is reused as the Step-2 drawing instruction, so be specific about what should appear.
-        - image_process: MUST be true if ANY of the following apply:
-            * the whiteboard contains freedraw elements
-            * the student uses words like "circled", "marked", "highlighted", "pointed", "these", "those", "the ones I", "that one", "this one" to refer to elements — if you cannot determine EXACTLY which elements they mean from the JSON alone, set true
-            * the student references elements by position ("the one on the left", "top right", "the bigger one") rather than by explicit id or label
-          Set false ONLY when you can identify all referenced elements with certainty from the JSON data alone.
-        - When creating new elements, do NOT reuse an existing element id.
+        - Always return exactly ONE operation. Never return multiple operations.
+        - CRITICAL: Only draw when the student EXPLICITLY asks for something to be drawn or calculated. If the student sends a greeting, small talk, or any purely conversational message, use null. Do NOT take initiative to draw educational content unprompted — wait for the student to ask.
+        - element_ids: IDs of the elements the operation acts on. Use [] for basic_draw.
+          For all other operations, always provide the specific element IDs from the whiteboard.
+        - operation_params: extra parameters used by some operations:
+          circle_sector → {{"angle": <degrees>}}
+          angle_measure → {{"vertex_index": <1-based int>}} when the student asks about a specific vertex/angle on a polygon. Omit (leave {{}}) when asking about all angles or when measuring between two lines.
+          All other operations → {{}}.
+        - text: a SHORT, natural reply to the student (1-2 sentences). Conversational only — do NOT describe drawing details here.
+        - instruction: a terse, precise drawing directive for the renderer (used as the Step-2 prompt). For null operations leave this empty string.
+          For drawing operations, describe ONLY what to draw and where: shape type, size, position, color. No topic context, no educational narrative.
+          Example: "Draw one parallelogram centered at (600, 400), width 300, height 150, no fill, black stroke."
+        - image_process: true if the whiteboard has freedraw elements OR the student refers to elements
+          by position/gesture ("the one on the left", "these", "that one"). False otherwise.
+        - Never reuse an existing element id when creating new elements.
 
         Return ONLY valid JSON, no explanation, no markdown:
         {{
-          "operation": "basic_draw" | "circle_center" | "triangle_orthocenter" | "intersection" | "circle_area" | "is_parallel" | "is_intersecting" | "parallel" | null,
+          "operation": "basic_draw" | "circle_center" | "triangle_orthocenter" | "intersection" | "circle_area" | "polygon_area" | "is_parallel" | "is_perpendicular" | "is_intersecting" | "parallel" | "perpendicular" | "circle_sector" | "parallelogram_height" | "angle_measure" | null,
           "element_ids": [],
+          "operation_params": {{}},
           "image_process": true_or_false,
-          "text": "short student-facing reply that also describes the drawing action"
+          "text": "short natural student-facing reply",
+          "instruction": "terse drawing directive or empty string if operation is null"
         }}
         """
 
 def step2_build(whiteboard: Whiteboard, description: str):
+    whiteboard_encoded = encode(
+        '{"board": '
+        + str(whiteboard.get_whiteboard_state())
+        + ', "elements": '
+        + str(whiteboard.get_whiteboard_elements())
+        + "}"
+    )
+
+    existing_ids = [el["id"] for el in whiteboard.get_whiteboard_elements()]
+    existing_ids_str = ", ".join(f'"{element_id}"' for element_id in existing_ids) if existing_ids else "none"
+
+    return f"""
+Instruction:
+{description}
+
+Board:
+{whiteboard_encoded}
+
+Existing element IDs:
+{existing_ids_str}
+
+Rules:
+- Draw only what the instruction explicitly requests.
+- Do not add labels, titles, explanations, arrows, axes, notes, examples, background elements, helper shapes, or decorative content unless explicitly requested.
+- Do not redraw, modify, move, resize, recolor, or delete existing elements unless the instruction explicitly asks for it.
+- Every new element must use a brand-new unique ID that does not exist in Existing element IDs.
+- Use short descriptive IDs such as "triangle-1", "circle-1", "equation-1", or "label-1".
+- If the instruction is unclear or cannot be completed safely, return {{"patches":[]}}.
+
+Element types:
+"rectangle" | "ellipse" | "line" | "arrow" | "text" | "freedraw"
+
+Style rules:
+- roughness: 0
+- Use "solid" only for filled shapes and "transparent" for empty shapes.
+- Use hex colors only, such as "#000000" or "#ff0000".
+- Never use CSS color names.
+- Height lines, perpendicular lines, and measurement annotations must use "#e03131" (red) so they stand out from the shape they annotate.
+
+Geometry rules:
+- Every line or arrow needs a points array with at least two entries.
+- The first point must always be [0, 0].
+- For closed shapes such as triangles, use one line element and end the points array with [0, 0].
+- For a filled dot, use the same strokeColor and backgroundColor.
+- Text elements must not have width=0 or height=0.
+
+Return JSON only.
+Do not explain.
+Do not use markdown.
+
+Output format:
+{json.dumps(Step2ExampleOutput)}
+
+Allowed element attributes:
+{json.dumps(Step2ExampleElement)}
+"""
+
+
+def old_step2_build(whiteboard: Whiteboard, description: str):
     whiteboard_encoded = encode('{"board": ' + str(whiteboard.get_whiteboard_state()) + ', "elements": ' + str(whiteboard.get_whiteboard_elements()) + '}')
+    existing_ids = [el["id"] for el in whiteboard.get_whiteboard_elements()]
+    existing_ids_str = ", ".join(f'"{i}"' for i in existing_ids) if existing_ids else "none"
     return f"""
         {description}
         {whiteboard_encoded}
+        EXISTING ELEMENT IDs (already on the board): {existing_ids_str}
+        NEVER output a patch for any of these IDs unless the instruction explicitly asks you to modify or delete that specific element.
+        All new elements you create MUST have brand-new unique IDs not in the list above.
+        STRICT SCOPE RULE — THIS IS NON-NEGOTIABLE:
+        Draw ONLY the element(s) explicitly described in the instruction above.
+        Do NOT add ANY of the following unless the instruction specifically asks for them:
+        - Title, subtitle, or label text
+        - Explanation boxes or annotation text
+        - Vectors, arrows, coordinate axes
+        - Educational diagrams or extra context shapes
+        - Background decorations or supporting elements
+        Do NOT redraw or modify any element already on the whiteboard unless the instruction explicitly says to change it.
+        MINIMUM TEXT DIMENSIONS — NEVER set width=0 or height=0 on a text element. Always compute:
+        width = max(80, fontSize * 0.6 * len(text_content))
+        height = max(24, fontSize * 1.4)
         CRITICAL OUTPUT RULES:
-        Return ONLY valid JSON. 
+        Return ONLY valid JSON.
         Do not explain.
         Do not use markdown.
         Do not wrap in ```json.

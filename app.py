@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from openai import OpenAI
 import requests
 import json
@@ -72,6 +73,7 @@ dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
 app = Flask(__name__)
+CORS(app)
 
 # Configure logging for TrustCall monitoring
 logging.basicConfig(level=logging.INFO)
@@ -306,7 +308,7 @@ def describe_user_intent(
         whiteboard,
         receive_dto: ReceiveDTO,
         use_ai: str,
-        pre_test_results: list | None = None,
+        pre_test_details: dict | None = None,
 ):
     # TODO: Remove this once Musa adds the AI_ID and Student_ID as payload attributes
     parsed_url = urlparse(receive_dto.receiving_url)
@@ -343,7 +345,7 @@ def describe_user_intent(
         history_context=history_context,
         user_message=receive_dto.user_message,
         whiteboard=whiteboard,
-        pre_test_results=pre_test_results or [],
+        pre_test_details=pre_test_details,
     )
 
     # WE CAN NOW RUN STEP 1
@@ -360,6 +362,14 @@ def describe_user_intent(
         print("Step 1 response:", step1_resp)
         logger.info(json.loads(step1_resp))
         result = Step1Reply(**json.loads(step1_resp))
+
+        # Hard guard: force null for obvious greetings regardless of what the LLM returned
+        msg = (receive_dto.user_message or "").strip().lower()
+        _GREETING_TOKENS = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "got it", "sure", "cool", "great", "nice", "bye", "goodbye"}
+        if result.operation is not None and len(msg.split()) <= 4 and all(w in _GREETING_TOKENS for w in msg.split()):
+            logger.info(f"[STEP1] Forcing null — message looks like a greeting: {msg!r}")
+            result.operation = None
+            result.instruction = ""
 
         if result.image_process and result.operation in (None, "basic_draw"):
             logger.info("[STEP1] image_process=true on basic/null op — retrying Step 1 with image")
@@ -382,28 +392,15 @@ def describe_user_intent(
         return jsonify({"error": f"Step 1 error: {e}"}), 500
 
 
-def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO, use_ai: str, image_process: bool):
-    operation = step1_response.operation or "basic_draw"
-    logger.info(f"[STEP2] operation={operation} element_ids={step1_response.element_ids}")
-
-    op_fn = getattr(sympy_ops, operation, sympy_ops.basic_draw)
-    op_result = op_fn(whiteboard, step1_response.element_ids)
-
-    patches = op_result["patches"]
-    text_override = op_result.get("text", "")
-    response_text = text_override if text_override else step1_response.text
-
-    if patches is not None:
-        logger.info(f"[STEP2] Skipping AI — {len(patches)} patch(es) generated server-side")
-        return patches, response_text
-
+def _run_step2_llm(whiteboard: Whiteboard, description: str, receive_dto: ReceiveDTO, use_ai: str, image_process: bool):
+    """Call the Step-2 LLM to generate whiteboard patches for basic_draw operations."""
     openai_temperature_str = os.getenv("OPENAI_TEMPERATURE")
     if not openai_temperature_str:
         raise ValueError("OPENAI_TEMPERATURE must be set in .env file")
     openai_temperature = float(openai_temperature_str)
 
     try:
-        PROMPT_SCAFFOLD = step2_build(whiteboard, step1_response.text)
+        PROMPT_SCAFFOLD = step2_build(whiteboard, description)
         model_step2 = os.getenv(f"{use_ai.upper()}_MODEL")
         if not model_step2:
             raise ValueError(f"{use_ai.upper()}_MODEL must be set in .env file")
@@ -414,16 +411,70 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: Receive
             step2_resp = getattr(ai_steps, f"call_{use_ai}_with_image_bytes")(PROMPT_SCAFFOLD, image_bytes, model_step2, openai_temperature)
         else:
             step2_resp = getattr(ai_steps, f"call_{use_ai}")(PROMPT_SCAFFOLD, model_step2, openai_temperature)
+
         logger.info(f"[STEP2] Received response ({len(step2_resp)} chars)")
         parsed = json.loads(step2_resp)
         # Normalise: AI may return a single patch dict instead of a list
         if isinstance(parsed, dict):
             parsed = [parsed]
-        return parsed, response_text
+        # Extract text if the LLM returned it inside the JSON
+        lm_text = ""
+        if parsed and isinstance(parsed[0], dict) and "text" in parsed[0]:
+            lm_text = parsed[0].pop("text", "")
+        return parsed, lm_text
 
     except Exception as e:
-        logger.error(f"Step 2 error: {e}", exc_info=True)
-        return [], response_text
+        logger.error(f"Step 2 LLM error: {e}", exc_info=True)
+        return [], ""
+
+
+def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: ReceiveDTO, use_ai: str, image_process: bool):
+    operation = step1_response.operation
+    if not operation:
+        return [], step1_response.text
+
+    logger.info(f"[STEP2] operation={operation} element_ids={step1_response.element_ids}")
+
+    # --- SymPy path (everything that is not basic_draw) ---
+    if operation != "basic_draw":
+        if not step1_response.element_ids:
+            logger.warning(f"[SYMPY] '{operation}' requires element_ids but none provided — replying with text only")
+            return [], step1_response.text
+
+        op_fn = getattr(sympy_ops, operation, None)
+        if not op_fn:
+            logger.warning(f"[SYMPY] No function found for operation '{operation}' — replying with text only")
+            return [], step1_response.text
+
+        try:
+            op_result = op_fn(whiteboard, step1_response.element_ids, params=step1_response.operation_params)
+        except TypeError:
+            op_result = op_fn(whiteboard, step1_response.element_ids)
+
+        patches = op_result.get("patches", [])
+        text_reply = op_result.get("text", "") or step1_response.text
+        logger.info(f"[SYMPY] '{operation}' produced {len(patches)} patch(es)")
+
+        if patches:
+            whiteboard.apply_patches_from_ai(patches)
+
+        return patches, text_reply
+
+    # --- basic_draw path: step 2 LLM only ---
+    lm_patches, lm_text = _run_step2_llm(whiteboard, step1_response.instruction, receive_dto, use_ai, image_process)
+    response_text = lm_text or step1_response.text
+
+    if lm_patches:
+        whiteboard.apply_patches_from_ai(lm_patches)
+
+    return lm_patches, response_text
+
+
+def _log_whiteboard_elements(whiteboard: Whiteboard, label: str) -> None:
+    active = [el for el in whiteboard.elements if not el.isDeleted]
+    lines = [f"  [{i}] id={el.id!r:30s} type={el.type!r:12s} x={el.x:<8.1f} y={el.y:<8.1f} w={el.width:<8.1f} h={el.height:<8.1f} color={el.strokeColor}"
+             for i, el in enumerate(active)]
+    logger.info(f"[WHITEBOARD {label}] {len(active)} active element(s):\n" + ("\n".join(lines) if lines else "  (empty)"))
 
 
 @app.route("/draw", methods=["POST"])
@@ -436,6 +487,7 @@ def draw():
     try:
         data = request.get_json()
         logger.info("Payload received, starting processing")
+        logger.info(f"[PRE-TEST] pre_test_details={data}")
 
         # TrustCall: Validate webhook payload
         is_valid, validation_error = validate_webhook_payload(data)
@@ -455,16 +507,18 @@ def draw():
             topic=data.get(
                 "topic"
             ),  # Topic, which will be useful in case we need to build a hard-coded AI per topic
-            pre_test_results=data.get("pre_test_results") or [],
+            pre_test_details=data.get("pre_test_details"),
         )
         whiteboard_state = data.get("whiteboard_state") or {}
         whiteboard = Whiteboard.model_validate(whiteboard_state)
+        _log_whiteboard_elements(whiteboard, "BEFORE")
         final_whiteboard_dict = whiteboard.to_excalidraw_dict()
         intent_timer = time.time()
-        step1_response = describe_user_intent(whiteboard, receive_dto, use_ai, receive_dto.pre_test_results)
+        step1_response = describe_user_intent(whiteboard, receive_dto, use_ai, receive_dto.pre_test_details)
         logger.info(f"Total time to assume describe user intent: {time.time() - intent_timer}s")
 
-        if step1_response.operation is not None:
+        has_draw_ops = step1_response.operation is not None
+        if has_draw_ops:
             logger.info(f"Board should be updated! operation={step1_response.operation}")
             shape_timer = time.time()
             patches, response_text = generate_shapes(
@@ -475,8 +529,8 @@ def draw():
                 image_process=step1_response.image_process
             )
             logger.info(f"Total time to generate shapes: {time.time() - shape_timer}s")
-            if patches:
-                whiteboard.apply_patches_from_ai(patches)
+            # patches already applied to whiteboard inside generate_shapes
+            _log_whiteboard_elements(whiteboard, "AFTER")
             final_whiteboard_dict = whiteboard.to_excalidraw_dict()
 
             response_json = json.dumps(
@@ -497,7 +551,7 @@ def draw():
             logger.info(f"Total time: {time.time() - start_time}s")
             return jsonify({"status": "sent", "reply": response_json}), 200
 
-        else:
+        else:  # no draw operations
             if whiteboard:
                 response_json = json.dumps(
                     {
@@ -526,7 +580,7 @@ def draw():
                 logger.error("Exception found: ", e)
                 raise
 
-        # logger.info(f"response json: {response_json}")
+        _log_whiteboard_elements(whiteboard, "AFTER")
         logger.info(f"Total time: {time.time() - start_time}s")
         return jsonify({"status": "sent", "reply": response_json}), 200
 

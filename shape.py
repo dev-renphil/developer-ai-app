@@ -165,8 +165,8 @@ class WhiteboardElement(BaseModel):
     type: Optional[str] = None
     angle: int | float = 0
     index: Optional[str] = None
-    width: int | float = 0
-    height: int | float = 0
+    width: int | float | None = 0
+    height: int | float | None = 0
     locked: bool = False
     frameId: Any = None
     opacity: int = 100
@@ -196,6 +196,7 @@ class WhiteboardElement(BaseModel):
     simulatePressure: Optional[bool] = None
 
     # text-specific
+    text: Optional[str] = None
     fontSize: float | None = None
     fontFamily: int | None = None
     textAlign: Optional[str] = None
@@ -210,6 +211,11 @@ class WhiteboardElement(BaseModel):
     @classmethod
     def normalize_list_fields(cls, v):
         return [] if v is None else v
+
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def normalize_dimensions(cls, v):
+        return 0 if v is None else v
 
 
 class Whiteboard(BaseModel):
