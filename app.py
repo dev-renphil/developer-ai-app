@@ -188,7 +188,6 @@ def validate_webhook_payload(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]
         required_fields = [
             "message",
             "history",
-            "whiteboard_state",
             "session_id",
             "receiving_url",
             "topic",
@@ -198,8 +197,12 @@ def validate_webhook_payload(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]
             if field not in data:
                 return False, f"Missing required field: {field}"
 
+        if "whiteboard_state" not in data and "whiteboard" not in data:
+            return False, "Missing required field: whiteboard_state"
+
         # Validate whiteboard state
-        is_valid, error = validate_whiteboard_payload(data.get("whiteboard_state", {}))
+        wb = data.get("whiteboard_state") or data.get("whiteboard") or {}
+        is_valid, error = validate_whiteboard_payload(wb)
         if not is_valid:
             return False, f"Invalid whiteboard state: {error}"
 
@@ -272,29 +275,24 @@ def get_whiteboard_image_bytes(root_url, whiteboard_json, verbose=True) -> bytes
         return None
 
 
-def diarize_message(msg_tup, student_id, ai_id):
+def diarize_message(msg_tup, student_id, ai_id, tutor_name=None):
+    label = tutor_name or "Tutor"
     if msg_tup["user_id"] == student_id:
         return {
             "text_message": msg_tup["text_message"],
             "timestamp": msg_tup["timestamp"],
             "user_id": "Student",
         }
-    elif msg_tup["user_id"] == ai_id:
-        return {
-            "text_message": msg_tup["text_message"],
-            "timestamp": msg_tup["timestamp"],
-            "user_id": "AI Tutor (You)",
-        }
     else:
         return {
             "text_message": msg_tup["text_message"],
             "timestamp": msg_tup["timestamp"],
-            "user_id": "AI Tutor (You)",
+            "user_id": label,
         }
 
 
-def diarize_history(api_history, student_id, ai_id):
-    return [diarize_message(m, student_id, ai_id) for m in api_history]
+def diarize_history(api_history, student_id, ai_id, tutor_name=None):
+    return [diarize_message(m, student_id, ai_id, tutor_name=tutor_name) for m in api_history]
 
 
 # LOOKBACK LENGTH (MESSAGES ONLY FOR NOW)
@@ -322,7 +320,7 @@ def describe_user_intent(
         student_id = None
 
     diarized_history = diarize_history(
-        receive_dto.history, student_id=student_id, ai_id=ai_id
+        receive_dto.history, student_id=student_id, ai_id=ai_id, tutor_name=receive_dto.tutor_name
     )
 
     # TODO: Consider whether to pass history timestamps in context?
@@ -452,7 +450,8 @@ def generate_shapes(whiteboard: Whiteboard, step1_response, receive_dto: Receive
             op_result = op_fn(whiteboard, step1_response.element_ids)
 
         patches = op_result.get("patches", [])
-        text_reply = op_result.get("text", "") or step1_response.text
+        sympy_text = op_result.get("text", "")
+        text_reply = f"{step1_response.text} {sympy_text}".strip() if sympy_text else step1_response.text
         logger.info(f"[SYMPY] '{operation}' produced {len(patches)} patch(es)")
 
         if patches:
@@ -496,20 +495,15 @@ def draw():
 
         use_ai = os.getenv("USE_AI")
         receive_dto = ReceiveDTO(
-            user_message=data.get("message"),  # Latest message that triggered the AI
-            history=data.get("history"),  # The complete conversation history
-            session_id=data.get(
-                "session_id"
-            ),  # Session ID (which is the same as the whiteboard ID)
-            receiving_url=data.get(
-                "receiving_url"
-            ),  # For now, parse student ID and AI ID from URL
-            topic=data.get(
-                "topic"
-            ),  # Topic, which will be useful in case we need to build a hard-coded AI per topic
+            user_message=data.get("message"),
+            history=data.get("history"),
+            session_id=data.get("session_id"),
+            receiving_url=data.get("receiving_url"),
+            topic=data.get("topic"),
             pre_test_details=data.get("pre_test_details"),
+            tutor_name=data.get("tutor_name"),
         )
-        whiteboard_state = data.get("whiteboard_state") or {}
+        whiteboard_state = data.get("whiteboard_state") or data.get("whiteboard") or {}
         whiteboard = Whiteboard.model_validate(whiteboard_state)
         _log_whiteboard_elements(whiteboard, "BEFORE")
         final_whiteboard_dict = whiteboard.to_excalidraw_dict()
@@ -538,6 +532,8 @@ def draw():
                     "text": response_text,
                     "appState": final_whiteboard_dict["appState"],
                     "elements": final_whiteboard_dict["elements"],
+                    "tutor_name": receive_dto.tutor_name,
+                    "session_id": receive_dto.session_id,
                 }
             )
 
@@ -558,6 +554,8 @@ def draw():
                         "text": step1_response.text,
                         "appState": final_whiteboard_dict["appState"],
                         "elements": final_whiteboard_dict["elements"],
+                        "tutor_name": receive_dto.tutor_name,
+                        "session_id": receive_dto.session_id,
                     }
                 )
             else:
@@ -566,6 +564,8 @@ def draw():
                         "text": step1_response.text,
                         "appState": {},
                         "elements": {},
+                        "tutor_name": receive_dto.tutor_name,
+                        "session_id": receive_dto.session_id,
                     }
                 )
 
