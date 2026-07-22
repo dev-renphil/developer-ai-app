@@ -12,6 +12,8 @@ import random
 import math
 import concurrent.futures
 from datetime import datetime
+import hmac
+from functools import wraps
 from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
@@ -301,6 +303,36 @@ if not lookback_len_str:
     raise ValueError("LOOKBACK_LEN must be set in .env file")
 LOOKBACK_LEN = int(lookback_len_str)
 
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+_ALLOWED_CALLBACK_HOSTS = set(
+    h.strip()
+    for h in os.getenv("ALLOWED_CALLBACK_HOSTS", "127.0.0.1,localhost").split(",")
+    if h.strip()
+)
+
+
+def require_internal_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if INTERNAL_API_SECRET:
+            token = request.headers.get("X-Internal-Token", "")
+            if not hmac.compare_digest(token.encode(), INTERNAL_API_SECRET.encode()):
+                return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def validate_receiving_url(url: str) -> Tuple[bool, str]:
+    if not url:
+        return False, "receiving_url is required"
+    try:
+        host = urlparse(url).hostname or ""
+        if host not in _ALLOWED_CALLBACK_HOSTS:
+            return False, f"receiving_url host '{host}' is not in the allowed list"
+    except Exception:
+        return False, "receiving_url is invalid"
+    return True, ""
+
 
 def describe_user_intent(
         whiteboard,
@@ -477,6 +509,7 @@ def _log_whiteboard_elements(whiteboard: Whiteboard, label: str) -> None:
 
 
 @app.route("/draw", methods=["POST"])
+@require_internal_auth
 def draw():
     start_time = time.time()
     logger.info("=" * 80)
@@ -492,6 +525,10 @@ def draw():
         is_valid, validation_error = validate_webhook_payload(data)
         if not is_valid:
             return jsonify({"error": f"Invalid payload: {validation_error}"}), 400
+
+        ssrf_ok, ssrf_err = validate_receiving_url(data.get("receiving_url", ""))
+        if not ssrf_ok:
+            return jsonify({"error": ssrf_err}), 400
 
         use_ai = os.getenv("USE_AI")
         receive_dto = ReceiveDTO(
@@ -591,6 +628,7 @@ def draw():
 
 
 @app.route("/receive2", methods=["POST"])
+@require_internal_auth
 def receive2():
     start_time = time.time()
     logger.info("=" * 80)
